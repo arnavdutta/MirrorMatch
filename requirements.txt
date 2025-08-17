@@ -1,0 +1,5 @@
+# MirrorMatch requirements
+# Works with Python 3.9+
+# Tkinter is included in standard Python installs
+# No external dependencies are currently required.
+
