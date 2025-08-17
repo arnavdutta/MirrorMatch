@@ -24,12 +24,18 @@ def file_crc32(file_path, chunk_size=65536):
         # In case of access issues, return None so it can be skipped
         return None
 
-def files_are_identical(file1, file2, chunk_size=65536):
+def files_are_identical(file1, file2, chunk_size=65536, pause_flag=None, cancel_flag=None):
     """Compare two files byte-by-byte to confirm they are identical."""
     try:
         with open(file1, "rb") as f1, open(file2, "rb") as f2:
             # Compare both files chunk by chunk
             while True:
+                # Check cancel and pause safely
+                if cancel_flag and cancel_flag.is_set():
+                    return False
+                if pause_flag:
+                    pause_flag.wait()
+
                 b1 = f1.read(chunk_size)
                 b2 = f2.read(chunk_size)
                 if b1 != b2:  # If mismatch found, files are not identical
@@ -40,7 +46,7 @@ def files_are_identical(file1, file2, chunk_size=65536):
     except (OSError, PermissionError):
         return False
 
-def find_duplicate_files(root_folder, progress_callback=None, cancel_flag=None):
+def find_duplicate_files(root_folder, progress_callback=None, cancel_flag=None, pause_flag=None):
     """
     Find duplicates in three steps:
     1. Group files by size.
@@ -51,8 +57,11 @@ def find_duplicate_files(root_folder, progress_callback=None, cancel_flag=None):
     all_files = []  # Track all files for progress
     for dirpath, _, filenames in os.walk(root_folder):
         for filename in filenames:
+            # Synchronize cancel/pause checks
             if cancel_flag and cancel_flag.is_set():
                 return []  # Early exit if cancelled
+            if pause_flag:
+                pause_flag.wait()
             file_path = os.path.abspath(os.path.join(dirpath, filename))
             try:
                 size = os.path.getsize(file_path)
@@ -75,6 +84,9 @@ def find_duplicate_files(root_folder, progress_callback=None, cancel_flag=None):
         for file_path in files:
             if cancel_flag and cancel_flag.is_set():
                 return []
+            if pause_flag:
+                pause_flag.wait()
+
             checksum = file_crc32(file_path)
             if checksum:
                 crc_map.setdefault(checksum, []).append(file_path)
@@ -82,21 +94,28 @@ def find_duplicate_files(root_folder, progress_callback=None, cancel_flag=None):
             if progress_callback:
                 progress_callback(processed, total)
 
-        # Compare inside each checksum group
+        # Compare files inside each checksum group
         for checksum, file_list in crc_map.items():
             if len(file_list) > 1:
                 checked = set()
                 for i in range(len(file_list)):
                     if cancel_flag and cancel_flag.is_set():
                         return []
+                    if pause_flag:
+                        pause_flag.wait()
+
                     if file_list[i] in checked:
                         continue
                     duplicate_set = [file_list[i]]
                     for j in range(i + 1, len(file_list)):
                         if cancel_flag and cancel_flag.is_set():
                             return []
-                        # Confirm file equality by comparing contents
-                        if file_list[j] not in checked and files_are_identical(file_list[i], file_list[j]):
+                        if pause_flag:
+                            pause_flag.wait()
+
+                        if file_list[j] not in checked and files_are_identical(
+                            file_list[i], file_list[j], pause_flag=pause_flag, cancel_flag=cancel_flag
+                        ):
                             duplicate_set.append(file_list[j])
                             checked.add(file_list[j])
                     if len(duplicate_set) > 1:
@@ -113,7 +132,7 @@ def find_duplicate_files(root_folder, progress_callback=None, cancel_flag=None):
 
 # ---------------- Utility ----------------
 def format_time(seconds):
-    """Format time duration into human-readable form (s, m, h, d)."""
+    """Format seconds into human-readable duration."""
     seconds = int(seconds)
     if seconds < 60:
         return f"{seconds}s"
@@ -199,14 +218,24 @@ class DuplicateFinderGUI:
         self.start_btn.pack(side=tk.LEFT, padx=5)
         ToolTip(self.start_btn, "Start scanning the selected folder for duplicate files.")
 
+        self.pause_btn = tk.Button(btn_frame, text="Pause", command=self.toggle_pause, state=tk.DISABLED)
+        self.pause_btn.pack(side=tk.LEFT, padx=5)
+        ToolTip(self.pause_btn, "Pause or resume the ongoing scan.")
+
         self.cancel_btn = tk.Button(btn_frame, text="Cancel", command=self.cancel_scan, state=tk.DISABLED)
         self.cancel_btn.pack(side=tk.LEFT, padx=5)
         ToolTip(self.cancel_btn, "Cancel the ongoing scan (if running).")
 
         # Internal state variables
         self.start_time = None
+        # Thread-safe flags to control worker threads
         self.cancel_flag = threading.Event()
+        self.pause_flag = threading.Event()
+        self.pause_flag.set()  # start in running state
         self.scanning = False
+        self.paused = False
+        # Lock to synchronize state transitions and avoid race conditions
+        self.state_lock = threading.Lock()
 
     def browse_folder(self):
         """Open dialog to select folder."""
@@ -220,28 +249,51 @@ class DuplicateFinderGUI:
         if not folder:
             messagebox.showwarning("MirrorMatch", "Please select a folder")
             return
-        self.cancel_flag.clear()
-        self.progress["value"] = 0
-        self.progress["maximum"] = 0
-        self.progress_label.config(text="0 / 0 files processed")
-        self.start_time = time.time()
-        self.scanning = True
-        self.cancel_btn.config(state=tk.NORMAL)
-        self.start_btn.config(state=tk.DISABLED)
-        # Launch scanning in a separate thread to keep UI responsive
+        with self.state_lock:
+            self.cancel_flag.clear()
+            self.pause_flag.set()
+            self.paused = False
+            self.progress["value"] = 0
+            self.progress["maximum"] = 0
+            self.progress_label.config(text="0 / 0 files processed")
+            self.start_time = time.time()
+            self.scanning = True
+            self.cancel_btn.config(state=tk.NORMAL)
+            self.pause_btn.config(state=tk.NORMAL, text="Pause")
+            self.start_btn.config(state=tk.DISABLED)
+		# Launch scanning in a separate thread to keep UI responsive
         threading.Thread(target=self.run_scan, args=(folder,), daemon=True).start()
 
     def cancel_scan(self):
         """Ask user for confirmation and set cancel flag if confirmed."""
-        if not self.scanning:
-            return
-        if messagebox.askokcancel("MirrorMatch", "Are you sure you want to cancel the scan?"):
-            self.cancel_flag.set()
-            # Reset progress bar and cancel button immediately
-            self.progress["value"] = 0
-            self.progress["maximum"] = 0
-            self.progress_label.config(text="0 / 0 files processed")
-            self.cancel_btn.config(state=tk.DISABLED)
+        with self.state_lock:
+            if not self.scanning:
+                return
+            if messagebox.askokcancel("MirrorMatch", "Are you sure you want to cancel the scan?"):
+                self.cancel_flag.set()
+                # Reset UI state safely
+                self.progress["value"] = 0
+                self.progress["maximum"] = 0
+                self.progress_label.config(text="0 / 0 files processed")
+                self.pause_btn.config(state=tk.DISABLED, text="Pause")
+                self.cancel_btn.config(state=tk.DISABLED)
+                self.start_btn.config(state=tk.NORMAL)
+                self.scanning = False
+                self.paused = False
+                self.pause_flag.set()
+
+    def toggle_pause(self):
+        with self.state_lock:
+            if not self.scanning:
+                return
+            if self.paused:
+                self.pause_flag.set()
+                self.pause_btn.config(text="Pause")
+                self.paused = False
+            else:
+                self.pause_flag.clear()
+                self.pause_btn.config(text="Resume")
+                self.paused = True
 
     def run_scan(self, folder):
         """Perform the scan and update UI asynchronously."""
@@ -259,43 +311,45 @@ class DuplicateFinderGUI:
             self.root.after(0, update_ui)
 
         # Run the duplicate detection
-        grouped_results = find_duplicate_files(folder, progress_callback, self.cancel_flag)
+        grouped_results = find_duplicate_files(folder, progress_callback, self.cancel_flag, self.pause_flag)
 
         def finalize():
-            """Finalize the operation: show results or cancellation message."""
-            if self.cancel_flag.is_set():
-                messagebox.showinfo("MirrorMatch", "User cancelled the scanning operation.")
-            elif grouped_results:
-                # Prepare CSV filename with datetime and folder name
-                folder_name = os.path.basename(os.path.normpath(folder))
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                csv_filename = f"duplicate_files_{folder_name}_{timestamp}.csv"
-                # Save results to CSV with quoting to avoid splitting on spaces/commas
-                with open(csv_filename, "w", newline="", encoding="utf-8") as f:
-                    writer = csv.writer(f, quoting=csv.QUOTE_ALL)
-                    writer.writerow(["checksum", "file_path", "duplicate_count"])
-                    for group in grouped_results:
-                        for file in group['files']:
-                            writer.writerow([group['checksum'], file, len(group['files'])])
+            with self.state_lock:
+                if self.cancel_flag.is_set():
+                    messagebox.showinfo("MirrorMatch", "User cancelled the scanning operation.")
+                elif grouped_results:
+                    folder_name = os.path.basename(os.path.normpath(folder))
+                    timestamp = datetime.now().strftime("%d%m%yT%H%M%S")
+                    csv_filename = f"duplicate_files_{folder_name}_{timestamp}.csv"
+                    with open(csv_filename, "w", newline="", encoding="utf-8") as f:
+                        writer = csv.writer(f, quoting=csv.QUOTE_ALL)
+                        writer.writerow(["checksum", "file_path", "duplicate_count"])
+                        for group in grouped_results:
+                            for file in group['files']:
+                                writer.writerow([group['checksum'], file, len(group['files'])])
+                            # Separate groups with blank lines
+                            writer.writerow([])
+                            writer.writerow([])
+                    messagebox.showinfo("MirrorMatch",
+                                        f"Scanning completed. CSV saved at:\n{os.path.abspath(csv_filename)}")
 
-                messagebox.showinfo("MirrorMatch",
-                                    f"Scanning completed. CSV saved at:\n{os.path.abspath(csv_filename)}")
-                # Attempt to open the file in default app
-                try:
-                    if os.name == 'nt':
-                        os.startfile(csv_filename)
-                    elif sys.platform == 'darwin':
-                        subprocess.call(('open', csv_filename))
-                    elif os.name == 'posix':
-                        subprocess.call(('xdg-open', csv_filename))
-                except Exception as e:
-                    messagebox.showwarning("MirrorMatch", f"Could not open CSV file automatically.\n{e}")
-            else:
-                messagebox.showinfo("MirrorMatch", "Scanning completed. No duplicates found.")
-            # Reset button state
-            self.cancel_btn.config(state=tk.DISABLED)
-            self.start_btn.config(state=tk.NORMAL)
-            self.scanning = False
+                    try:
+                        if os.name == 'nt':
+                            os.startfile(csv_filename)
+                        elif sys.platform == 'darwin':
+                            subprocess.call(('open', csv_filename))
+                        elif os.name == 'posix':
+                            subprocess.call(('xdg-open', csv_filename))
+                    except Exception as e:
+                        messagebox.showwarning("MirrorMatch", f"Could not open CSV automatically.\n{e}")
+                else:
+                    messagebox.showinfo("MirrorMatch", "Scanning completed. No duplicates found.")
+
+                self.cancel_btn.config(state=tk.DISABLED)
+                self.pause_btn.config(state=tk.DISABLED, text="Pause")
+                self.start_btn.config(state=tk.NORMAL)
+                self.scanning = False
+                self.paused = False
 
         # Schedule finalize in UI thread
         self.root.after(0, finalize)
@@ -304,7 +358,7 @@ class DuplicateFinderGUI:
         """Show About dialog with app info."""
         messagebox.showinfo(
             "MirrorMatch",
-            "MirrorMatch: Find Duplicates\nVersion 1.5.7\n\n"
+            "MirrorMatch: Find Duplicates\nVersion 1.6.1\n\n"
             "Developed by Arnav Dutta.\n\n"
             "This software scans the chosen folder, identifies duplicate files "
             "by comparing checksums and full contents, and produces a CSV report."
