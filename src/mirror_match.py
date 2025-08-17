@@ -186,16 +186,21 @@ class DuplicateFinderGUI:
         tk.Label(frame, text="Filter Extensions:").grid(row=1, column=0, sticky="w")
         self.extension_vars = {}
         extensions = ["docx", "xlsx", "doc", "ppt", "pptx", "xls", "png", "jpg", "gif", "heif"]
-        ext_frame = tk.Frame(frame)
+        ext_frame = tk.LabelFrame(frame, text="Select Extensions")
         ext_frame.grid(row=1, column=1, columnspan=2, sticky="w")
         self.all_var = tk.BooleanVar(value=True)
         all_cb = tk.Checkbutton(ext_frame, text="All", variable=self.all_var, command=self.toggle_all_extensions)
-        all_cb.pack(side=tk.LEFT)
-        for ext in extensions:
+        all_cb.grid(row=0, column=0, sticky="w")
+        row, col = 1, 0
+        for i, ext in enumerate(extensions):
             var = tk.BooleanVar(value=False)
             cb = tk.Checkbutton(ext_frame, text=ext, variable=var, command=self.unset_all)
-            cb.pack(side=tk.LEFT)
+            cb.grid(row=row, column=col, sticky="w")
             self.extension_vars[ext] = var
+            col += 1
+            if col > 4:
+                col = 0
+                row += 1
         ToolTip(ext_frame, "Select one or more extensions to filter by during scan, or choose All.")
 
         self.progress = ttk.Progressbar(frame, length=400, mode="determinate")
