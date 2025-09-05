@@ -11,26 +11,19 @@ import sys
 
 # ---------------- Duplicate Finder Logic ----------------
 def file_crc32(file_path, chunk_size=65536):
-    """Compute CRC32 hash of a file in chunks to avoid memory issues."""
     prev = 0
     try:
         with open(file_path, "rb") as f:
-            # Read file in chunks and update CRC32 progressively
             for chunk in iter(lambda: f.read(chunk_size), b""):
                 prev = zlib.crc32(chunk, prev)
-        # Return 8-digit hex string
         return format(prev & 0xFFFFFFFF, '08x')
     except (OSError, PermissionError):
-        # In case of access issues, return None so it can be skipped
         return None
 
 def files_are_identical(file1, file2, chunk_size=65536, pause_flag=None, cancel_flag=None):
-    """Compare two files byte-by-byte to confirm they are identical."""
     try:
         with open(file1, "rb") as f1, open(file2, "rb") as f2:
-            # Compare both files chunk by chunk
             while True:
-                # Check cancel and pause safely
                 if cancel_flag and cancel_flag.is_set():
                     return False
                 if pause_flag:
@@ -38,46 +31,43 @@ def files_are_identical(file1, file2, chunk_size=65536, pause_flag=None, cancel_
 
                 b1 = f1.read(chunk_size)
                 b2 = f2.read(chunk_size)
-                if b1 != b2:  # If mismatch found, files are not identical
+                if b1 != b2:
                     return False
-                if not b1:  # End of file reached
+                if not b1:
                     break
         return True
     except (OSError, PermissionError):
         return False
 
-def find_duplicate_files(root_folder, progress_callback=None, cancel_flag=None, pause_flag=None):
-    """
-    Find duplicates in three steps:
-    1. Group files by size.
-    2. For groups > 1, compute CRC32 hashes.
-    3. For hash groups > 1, confirm by byte comparison.
-    """
-    size_map = {}  # Group files by size
-    all_files = []  # Track all files for progress
+def find_duplicate_files(root_folder, extensions=None, progress_callback=None, cancel_flag=None, pause_flag=None):
+    size_map = {}
+    all_files = []
     for dirpath, _, filenames in os.walk(root_folder):
         for filename in filenames:
-            # Synchronize cancel/pause checks
             if cancel_flag and cancel_flag.is_set():
-                return []  # Early exit if cancelled
+                return []
             if pause_flag:
                 pause_flag.wait()
+
+            if extensions and not any(filename.lower().endswith(ext) for ext in extensions):
+                continue
+
             file_path = os.path.abspath(os.path.join(dirpath, filename))
             try:
                 size = os.path.getsize(file_path)
                 size_map.setdefault(size, []).append(file_path)
                 all_files.append(file_path)
             except (OSError, PermissionError):
-                continue  # Skip files with access issues
+                continue
 
-    duplicates_verified = []  # Final verified duplicates
+    duplicates_verified = []
     processed = 0
     total = len(all_files)
 
     for size, files in size_map.items():
         if cancel_flag and cancel_flag.is_set():
             return []
-        if len(files) < 2:  # Skip unique size groups
+        if len(files) < 2:
             continue
 
         crc_map = {}
@@ -94,7 +84,6 @@ def find_duplicate_files(root_folder, progress_callback=None, cancel_flag=None, 
             if progress_callback:
                 progress_callback(processed, total)
 
-        # Compare files inside each checksum group
         for checksum, file_list in crc_map.items():
             if len(file_list) > 1:
                 checked = set()
@@ -124,15 +113,12 @@ def find_duplicate_files(root_folder, progress_callback=None, cancel_flag=None, 
 
     grouped_results = [{"checksum": checksum, "files": paths} for checksum, paths in duplicates_verified]
 
-    # Ensure the last progress update shows completion
     if progress_callback:
         progress_callback(total, total)
     return grouped_results
 
 
-# ---------------- Utility ----------------
 def format_time(seconds):
-    """Format seconds into human-readable duration."""
     seconds = int(seconds)
     if seconds < 60:
         return f"{seconds}s"
@@ -146,9 +132,7 @@ def format_time(seconds):
     return f"{days}d {hours}h {minutes}m {seconds}s"
 
 
-# ---------------- Tooltip Helper ----------------
 class ToolTip:
-    """Attach a tooltip (hover text) to a widget."""
     def __init__(self, widget, text):
         self.widget = widget
         self.text = text
@@ -159,8 +143,6 @@ class ToolTip:
     def show_tip(self, event=None):
         if self.tip_window or not self.text:
             return
-
-        # Position tooltip near the widget
         try:
             x, y, cx, cy = self.widget.bbox("insert")
         except Exception:
@@ -168,7 +150,7 @@ class ToolTip:
         x += self.widget.winfo_rootx() + 25
         y += self.widget.winfo_rooty() + 25
         self.tip_window = tw = tk.Toplevel(self.widget)
-        tw.wm_overrideredirect(True)  # Remove window decorations
+        tw.wm_overrideredirect(True)
         tw.wm_geometry(f"+{x}+{y}")
         label = tk.Label(tw, text=self.text, background="yellow", relief="solid", borderwidth=1)
         label.pack(ipadx=1)
@@ -179,21 +161,18 @@ class ToolTip:
             self.tip_window = None
 
 
-# ---------------- GUI ----------------
 class DuplicateFinderGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("MirrorMatch: Find Duplicates")
-        self.root.resizable(False, False)  # Make window non-resizable
+        self.root.resizable(False, False)
 
-        # Menu bar with About option
         menubar = tk.Menu(root)
         root.config(menu=menubar)
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Help", menu=help_menu)
         help_menu.add_command(label="About", command=self.show_about)
 
-        # Folder selection row
         self.folder_path = tk.StringVar()
         frame = tk.Frame(root)
         frame.pack(padx=10, pady=10)
@@ -204,15 +183,33 @@ class DuplicateFinderGUI:
         browse_btn.grid(row=0, column=2, padx=5)
         ToolTip(browse_btn, "Browse and select the folder to scan for duplicate files.")
 
-        # Progress bar and label
-        self.progress = ttk.Progressbar(frame, length=400, mode="determinate")
-        self.progress.grid(row=1, column=0, columnspan=3, pady=5)
-        self.progress_label = tk.Label(frame, text="0 / 0 files processed")
-        self.progress_label.grid(row=2, column=0, columnspan=3)
+        tk.Label(frame, text="Filter Extensions:").grid(row=1, column=0, sticky="w")
+        self.extension_vars = {}
+        extensions = ["docx", "xlsx", "doc", "ppt", "pptx", "xls", "png", "jpg", "gif", "heif"]
+        ext_frame = tk.LabelFrame(frame, text="Select Extensions")
+        ext_frame.grid(row=1, column=1, columnspan=2, sticky="w")
+        self.all_var = tk.BooleanVar(value=True)
+        all_cb = tk.Checkbutton(ext_frame, text="All", variable=self.all_var, command=self.toggle_all_extensions)
+        all_cb.grid(row=0, column=0, sticky="w")
+        row, col = 1, 0
+        for i, ext in enumerate(extensions):
+            var = tk.BooleanVar(value=False)
+            cb = tk.Checkbutton(ext_frame, text=ext, variable=var, command=self.unset_all)
+            cb.grid(row=row, column=col, sticky="w")
+            self.extension_vars[ext] = var
+            col += 1
+            if col > 4:
+                col = 0
+                row += 1
+        ToolTip(ext_frame, "Select one or more extensions to filter by during scan, or choose All.")
 
-        # Buttons (Find Duplicates and Cancel)
+        self.progress = ttk.Progressbar(frame, length=400, mode="determinate")
+        self.progress.grid(row=2, column=0, columnspan=3, pady=5)
+        self.progress_label = tk.Label(frame, text="0 / 0 files processed")
+        self.progress_label.grid(row=3, column=0, columnspan=3)
+
         btn_frame = tk.Frame(frame)
-        btn_frame.grid(row=3, column=0, columnspan=3, pady=5)
+        btn_frame.grid(row=4, column=0, columnspan=3, pady=5)
 
         self.start_btn = tk.Button(btn_frame, text="Find Duplicates", command=self.start_scan)
         self.start_btn.pack(side=tk.LEFT, padx=5)
@@ -226,25 +223,29 @@ class DuplicateFinderGUI:
         self.cancel_btn.pack(side=tk.LEFT, padx=5)
         ToolTip(self.cancel_btn, "Cancel the ongoing scan (if running).")
 
-        # Internal state variables
         self.start_time = None
-        # Thread-safe flags to control worker threads
         self.cancel_flag = threading.Event()
         self.pause_flag = threading.Event()
-        self.pause_flag.set()  # start in running state
+        self.pause_flag.set()
         self.scanning = False
         self.paused = False
-        # Lock to synchronize state transitions and avoid race conditions
         self.state_lock = threading.Lock()
 
+    def toggle_all_extensions(self):
+        if self.all_var.get():
+            for var in self.extension_vars.values():
+                var.set(False)
+
+    def unset_all(self):
+        if any(var.get() for var in self.extension_vars.values()):
+            self.all_var.set(False)
+
     def browse_folder(self):
-        """Open dialog to select folder."""
         folder = filedialog.askdirectory()
         if folder:
             self.folder_path.set(folder)
 
     def start_scan(self):
-        """Start scanning for duplicates in a background thread."""
         folder = self.folder_path.get()
         if not folder:
             messagebox.showwarning("MirrorMatch", "Please select a folder")
@@ -261,17 +262,14 @@ class DuplicateFinderGUI:
             self.cancel_btn.config(state=tk.NORMAL)
             self.pause_btn.config(state=tk.NORMAL, text="Pause")
             self.start_btn.config(state=tk.DISABLED)
-		# Launch scanning in a separate thread to keep UI responsive
         threading.Thread(target=self.run_scan, args=(folder,), daemon=True).start()
 
     def cancel_scan(self):
-        """Ask user for confirmation and set cancel flag if confirmed."""
         with self.state_lock:
             if not self.scanning:
                 return
             if messagebox.askokcancel("MirrorMatch", "Are you sure you want to cancel the scan?"):
                 self.cancel_flag.set()
-                # Reset UI state safely
                 self.progress["value"] = 0
                 self.progress["maximum"] = 0
                 self.progress_label.config(text="0 / 0 files processed")
@@ -296,9 +294,7 @@ class DuplicateFinderGUI:
                 self.paused = True
 
     def run_scan(self, folder):
-        """Perform the scan and update UI asynchronously."""
         def progress_callback(done, total):
-            # Progress callback called from scanning function
             def update_ui():
                 self.progress["maximum"] = total
                 self.progress["value"] = done
@@ -307,11 +303,14 @@ class DuplicateFinderGUI:
                 remaining = avg_time * (total - done) if avg_time else 0
                 eta_text = f"{done} / {total} files processed | Elapsed: {format_time(elapsed)} | ETA: {format_time(remaining)}"
                 self.progress_label.config(text=eta_text)
-            # Schedule UI update safely in main thread
             self.root.after(0, update_ui)
 
-        # Run the duplicate detection
-        grouped_results = find_duplicate_files(folder, progress_callback, self.cancel_flag, self.pause_flag)
+        if self.all_var.get():
+            extensions = None
+        else:
+            extensions = [f".{ext}" for ext, var in self.extension_vars.items() if var.get()]
+
+        grouped_results = find_duplicate_files(folder, extensions=extensions, progress_callback=progress_callback, cancel_flag=self.cancel_flag, pause_flag=self.pause_flag)
 
         def finalize():
             with self.state_lock:
@@ -327,12 +326,9 @@ class DuplicateFinderGUI:
                         for group in grouped_results:
                             for file in group['files']:
                                 writer.writerow([group['checksum'], file, len(group['files'])])
-                            # Separate groups with blank lines
                             writer.writerow([])
                             writer.writerow([])
-                    messagebox.showinfo("MirrorMatch",
-                                        f"Scanning completed. CSV saved at:\n{os.path.abspath(csv_filename)}")
-
+                    messagebox.showinfo("MirrorMatch", f"Scanning completed. CSV saved at:\n{os.path.abspath(csv_filename)}")
                     try:
                         if os.name == 'nt':
                             os.startfile(csv_filename)
@@ -350,22 +346,18 @@ class DuplicateFinderGUI:
                 self.start_btn.config(state=tk.NORMAL)
                 self.scanning = False
                 self.paused = False
-
-        # Schedule finalize in UI thread
         self.root.after(0, finalize)
 
     def show_about(self):
-        """Show About dialog with app info."""
         messagebox.showinfo(
             "MirrorMatch",
-            "MirrorMatch: Find Duplicates\nVersion 1.6.1\n\n"
+            "MirrorMatch: Find Duplicates\nVersion 1.7.0\n\n"
             "Developed by Arnav Dutta.\n\n"
             "This software scans the chosen folder, identifies duplicate files "
             "by comparing checksums and full contents, and produces a CSV report."
         )
 
 
-# ---------------- Entry Point ----------------
 if __name__ == "__main__":
     root = tk.Tk()
     app = DuplicateFinderGUI(root)
