@@ -351,7 +351,7 @@ class DuplicateFinderGUI:
     def show_about(self):
         messagebox.showinfo(
             "MirrorMatch",
-            "MirrorMatch: Find Duplicates\nVersion 1.6.1\n\n"
+            "MirrorMatch: Find Duplicates\nVersion 1.7.0\n\n"
             "Developed by Arnav Dutta.\n\n"
             "This software scans the chosen folder, identifies duplicate files "
             "by comparing checksums and full contents, and produces a CSV report."
